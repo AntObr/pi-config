@@ -1,2 +1,7 @@
 # pi-config
-My configuration for the pi agent harness
+
+This is my personal configuration for [pi](https://github.com/earendil-works/pi-coding-agent).
+
+## Extensions
+
+Each extension has its own README.md
