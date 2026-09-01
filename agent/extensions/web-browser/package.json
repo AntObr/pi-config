@@ -1,0 +1,34 @@
+{
+  "name": "pi-web-browser-extension",
+  "version": "0.1.0",
+  "description": "Pi extension that will expose Playwright-backed browser tools.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "browser",
+    "playwright"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.57.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "tsx": "^4.20.6",
+    "typebox": "^1.0.59",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
