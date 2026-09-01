@@ -60,8 +60,18 @@ test("default export loads without using other Pi APIs", () => {
 test("placeholder tools return clear not implemented results", async () => {
   assert.equal(browserTools.length, expectedToolNames.length);
 
-  for (const tool of browserTools) {
-    const result = await tool.execute();
+  const paramsByTool: Record<string, Record<string, unknown>> = {
+    browser_navigate: { url: "https://example.com" },
+    browser_search: { query: "example" },
+    browser_inspect: {},
+    browser_raw_html: {},
+    browser_screenshot: {},
+    browser_interact: { action: "click", selector: "button" },
+    browser_close: {},
+  };
+
+  for (const tool of browserTools as AnyToolDefinition[]) {
+    const result = await tool.execute("test-call", paramsByTool[tool.name] ?? {}, undefined, undefined, { cwd: process.cwd() } as never);
     assert.equal(result.details.status, "not_implemented");
     assert.equal(result.details.tool, tool.name);
     assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /not implemented yet/i);

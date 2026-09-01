@@ -22,6 +22,29 @@ Generated screenshots and HTML captures will be written under `.pi/web-browser-a
 .pi/web-browser-artifacts/
 ```
 
+## Configuration
+
+The extension reads `web-browser.json` from three places, in this order:
+
+1. Package config in the extension package directory.
+2. User config in `~/.pi/agent` or `PI_CODING_AGENT_DIR`.
+3. Project config in `.pi` under the current project.
+
+Later files override earlier files. With no config, the defaults are headless Chromium, a 30 second navigation timeout, Google search, permissive host navigation, and `.pi/web-browser-artifacts` for generated files.
+
+```json
+{
+  "headless": true,
+  "navigationTimeoutMs": 30000,
+  "searchUrl": "https://www.google.com/search?q={query}",
+  "allowedHosts": ["localhost", "*.example.com"],
+  "blockedHosts": ["internal.example.com"],
+  "artifactDir": ".pi/web-browser-artifacts"
+}
+```
+
+An empty `allowedHosts` list allows any host unless `blockedHosts` matches. A non-empty `allowedHosts` list restricts navigation to matching hosts. `blockedHosts` always wins.
+
 ## Registered tools
 
 - `browser_navigate`
