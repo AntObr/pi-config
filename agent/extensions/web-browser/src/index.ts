@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { chromium } from "playwright";
 
 type PlaceholderDetails = {
   status: "not_implemented";
@@ -14,6 +15,19 @@ type PlaceholderDetails = {
 
 type NavigationDeniedDetails = {
   status: "denied";
+  reason: string;
+};
+
+type NavigationLoadedDetails = {
+  status: "loaded";
+  session: string;
+  url: string;
+  title: string;
+  timeoutMs: number;
+};
+
+type BrowserInstallRequiredDetails = {
+  status: "browser_install_required";
   reason: string;
 };
 
@@ -98,10 +112,22 @@ function navigationDeniedResult(error: NavigationPolicyError): AgentToolResult<N
   return textResult(error.message, { status: "denied", reason: error.message });
 }
 
-function toolErrorResult(error: unknown): AgentToolResult<ConfigErrorDetails | NavigationDeniedDetails> | undefined {
+function browserInstallRequiredResult(error: Error): AgentToolResult<BrowserInstallRequiredDetails> {
+  const message = `Chromium is not installed for Playwright. Run \`npx playwright install chromium\` and try again.`;
+  return textResult(message, { status: "browser_install_required", reason: error.message });
+}
+
+function toolErrorResult(
+  error: unknown,
+): AgentToolResult<ConfigErrorDetails | NavigationDeniedDetails | BrowserInstallRequiredDetails> | undefined {
   if (error instanceof BrowserConfigError) return configErrorResult(error);
   if (error instanceof NavigationPolicyError) return navigationDeniedResult(error);
+  if (error instanceof Error && isMissingChromiumError(error)) return browserInstallRequiredResult(error);
   return undefined;
+}
+
+function isMissingChromiumError(error: Error): boolean {
+  return /Executable doesn't exist|playwright install/i.test(error.message);
 }
 
 function defaultUserConfigDir(): string {
@@ -236,15 +262,87 @@ export function buildSearchUrl(query: string, config: Pick<BrowserConfig, "searc
   return config.searchUrl.replace("{query}", encodedQuery);
 }
 
+type BrowserTypeLike = {
+  launch(options: { headless: boolean }): Promise<BrowserLike>;
+};
+
+type BrowserLike = {
+  newContext(): Promise<BrowserContextLike>;
+  close(): Promise<void>;
+};
+
+type BrowserContextLike = {
+  newPage(): Promise<PageLike>;
+  close(): Promise<void>;
+};
+
+type PageLike = {
+  goto(url: string, options: { waitUntil: "load"; timeout: number }): Promise<unknown>;
+  url(): string;
+  title(): Promise<string>;
+};
+
+type BrowserSession = {
+  browser: BrowserLike;
+  context: BrowserContextLike;
+  page: PageLike;
+};
+
+export class BrowserManager {
+  private sessions = new Map<string, BrowserSession>();
+
+  constructor(private readonly browserType: BrowserTypeLike = chromium) {}
+
+  async navigate(
+    url: string,
+    options: { session: string; headless: boolean; timeoutMs: number },
+  ): Promise<{ url: string; title: string }> {
+    const session = await this.getSession(options.session, options.headless);
+    await session.page.goto(url, { waitUntil: "load", timeout: options.timeoutMs });
+    return { url: session.page.url(), title: await session.page.title() };
+  }
+
+  private async getSession(name: string, headless: boolean): Promise<BrowserSession> {
+    const existing = this.sessions.get(name);
+    if (existing) return existing;
+
+    const browser = await this.browserType.launch({ headless });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const session = { browser, context, page };
+    this.sessions.set(name, session);
+    return session;
+  }
+}
+
+const defaultBrowserManager = new BrowserManager();
+
 async function resolveConfigForTool(ctx?: ExtensionContext): Promise<BrowserConfig> {
   return resolveBrowserConfig({ cwd: ctx?.cwd });
 }
 
-async function checkedNavigationResult(url: string, tool: string, ctx?: ExtensionContext): Promise<AgentToolResult<unknown>> {
+async function checkedNavigationResult(
+  params: { url: string; session?: string; headless?: boolean; timeoutMs?: number },
+  manager: BrowserManager,
+  ctx?: ExtensionContext,
+): Promise<AgentToolResult<unknown>> {
   try {
     const config = await resolveConfigForTool(ctx);
-    assertUrlAllowed(url, config);
-    return notImplemented(tool);
+    assertUrlAllowed(params.url, config);
+    const session = params.session ?? "default";
+    const timeoutMs = params.timeoutMs ?? config.navigationTimeoutMs;
+    const loaded = await manager.navigate(params.url, {
+      session,
+      headless: params.headless ?? config.headless,
+      timeoutMs,
+    });
+    return textResult(`Loaded ${loaded.title || loaded.url} at ${loaded.url}.`, {
+      status: "loaded",
+      session,
+      url: loaded.url,
+      title: loaded.title,
+      timeoutMs,
+    } satisfies NavigationLoadedDetails);
   } catch (error) {
     const result = toolErrorResult(error);
     if (result) return result;
@@ -252,120 +350,129 @@ async function checkedNavigationResult(url: string, tool: string, ctx?: Extensio
   }
 }
 
-export const browserTools = [
-  defineTool({
-    name: "browser_navigate",
-    label: "Browser navigate",
-    description: "Open a URL in a named browser session.",
-    promptSnippet: "browser_navigate: open a URL in a named browser session",
-    parameters: Type.Object({
-      url: Type.String({ description: "URL to open." }),
-      session: sessionParameter,
-      headless: Type.Optional(
-        Type.Boolean({ description: "Choose headless mode when creating a new session." }),
-      ),
-      timeoutMs: navigationTimeoutParameter,
+type BrowserToolDependencies = {
+  manager?: BrowserManager;
+};
+
+export function createBrowserTools(dependencies: BrowserToolDependencies = {}): ToolDefinition[] {
+  const manager = dependencies.manager ?? defaultBrowserManager;
+  return [
+    defineTool({
+      name: "browser_navigate",
+      label: "Browser navigate",
+      description: "Open a URL in a named browser session.",
+      promptSnippet: "browser_navigate: open a URL in a named browser session",
+      parameters: Type.Object({
+        url: Type.String({ description: "URL to open." }),
+        session: sessionParameter,
+        headless: Type.Optional(
+          Type.Boolean({ description: "Choose headless mode when creating a new session." }),
+        ),
+        timeoutMs: navigationTimeoutParameter,
+      }),
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        return checkedNavigationResult(params, manager, ctx);
+      },
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return checkedNavigationResult(params.url, "browser_navigate", ctx);
-    },
-  }),
-  defineTool({
-    name: "browser_search",
-    label: "Browser search",
-    description: "Search the web through a browser session.",
-    promptSnippet: "browser_search: search the web through a browser session",
-    parameters: Type.Object({
-      query: Type.String({ description: "Search query." }),
-      session: sessionParameter,
-      timeoutMs: navigationTimeoutParameter,
+    defineTool({
+      name: "browser_search",
+      label: "Browser search",
+      description: "Search the web through a browser session.",
+      promptSnippet: "browser_search: search the web through a browser session",
+      parameters: Type.Object({
+        query: Type.String({ description: "Search query." }),
+        session: sessionParameter,
+        timeoutMs: navigationTimeoutParameter,
+      }),
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        try {
+          const config = await resolveConfigForTool(ctx);
+          const url = buildSearchUrl(params.query, config);
+          assertUrlAllowed(url, config);
+          return notImplemented("browser_search");
+        } catch (error) {
+          const result = toolErrorResult(error);
+          if (result) return result;
+          throw error;
+        }
+      },
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      try {
-        const config = await resolveConfigForTool(ctx);
-        const url = buildSearchUrl(params.query, config);
-        assertUrlAllowed(url, config);
-        return notImplemented("browser_search");
-      } catch (error) {
-        const result = toolErrorResult(error);
-        if (result) return result;
-        throw error;
-      }
-    },
-  }),
-  defineTool({
-    name: "browser_inspect",
-    label: "Browser inspect",
-    description: "Return a compact inspection of the current browser page.",
-    promptSnippet: "browser_inspect: inspect the current browser page",
-    parameters: Type.Object({
-      session: sessionParameter,
+    defineTool({
+      name: "browser_inspect",
+      label: "Browser inspect",
+      description: "Return a compact inspection of the current browser page.",
+      promptSnippet: "browser_inspect: inspect the current browser page",
+      parameters: Type.Object({
+        session: sessionParameter,
+      }),
+      async execute() {
+        return notImplemented("browser_inspect");
+      },
     }),
-    async execute() {
-      return notImplemented("browser_inspect");
-    },
-  }),
-  defineTool({
-    name: "browser_raw_html",
-    label: "Browser raw HTML",
-    description: "Return raw HTML for the current page or a selector.",
-    promptSnippet: "browser_raw_html: capture raw HTML from the current page",
-    parameters: Type.Object({
-      session: sessionParameter,
-      selector: Type.Optional(Type.String({ description: "Optional selector to capture." })),
+    defineTool({
+      name: "browser_raw_html",
+      label: "Browser raw HTML",
+      description: "Return raw HTML for the current page or a selector.",
+      promptSnippet: "browser_raw_html: capture raw HTML from the current page",
+      parameters: Type.Object({
+        session: sessionParameter,
+        selector: Type.Optional(Type.String({ description: "Optional selector to capture." })),
+      }),
+      async execute() {
+        return notImplemented("browser_raw_html");
+      },
     }),
-    async execute() {
-      return notImplemented("browser_raw_html");
-    },
-  }),
-  defineTool({
-    name: "browser_screenshot",
-    label: "Browser screenshot",
-    description: "Save a screenshot for the current page.",
-    promptSnippet: "browser_screenshot: save a screenshot for the current page",
-    parameters: Type.Object({
-      session: sessionParameter,
-      fullPage: Type.Optional(Type.Boolean({ description: "Capture the full page." })),
+    defineTool({
+      name: "browser_screenshot",
+      label: "Browser screenshot",
+      description: "Save a screenshot for the current page.",
+      promptSnippet: "browser_screenshot: save a screenshot for the current page",
+      parameters: Type.Object({
+        session: sessionParameter,
+        fullPage: Type.Optional(Type.Boolean({ description: "Capture the full page." })),
+      }),
+      async execute() {
+        return notImplemented("browser_screenshot");
+      },
     }),
-    async execute() {
-      return notImplemented("browser_screenshot");
-    },
-  }),
-  defineTool({
-    name: "browser_interact",
-    label: "Browser interact",
-    description: "Click, type, fill, press, or select on the current page.",
-    promptSnippet: "browser_interact: interact with elements on the current page",
-    parameters: Type.Object({
-      session: sessionParameter,
-      action: Type.Union([
-        Type.Literal("click"),
-        Type.Literal("type"),
-        Type.Literal("fill"),
-        Type.Literal("press"),
-        Type.Literal("select"),
-      ]),
-      elementId: Type.Optional(Type.String({ description: "Element ID from the latest inspection." })),
-      selector: Type.Optional(Type.String({ description: "Raw selector to target." })),
-      value: Type.Optional(Type.String({ description: "Text, key, or option value for the action." })),
+    defineTool({
+      name: "browser_interact",
+      label: "Browser interact",
+      description: "Click, type, fill, press, or select on the current page.",
+      promptSnippet: "browser_interact: interact with elements on the current page",
+      parameters: Type.Object({
+        session: sessionParameter,
+        action: Type.Union([
+          Type.Literal("click"),
+          Type.Literal("type"),
+          Type.Literal("fill"),
+          Type.Literal("press"),
+          Type.Literal("select"),
+        ]),
+        elementId: Type.Optional(Type.String({ description: "Element ID from the latest inspection." })),
+        selector: Type.Optional(Type.String({ description: "Raw selector to target." })),
+        value: Type.Optional(Type.String({ description: "Text, key, or option value for the action." })),
+      }),
+      async execute() {
+        return notImplemented("browser_interact");
+      },
     }),
-    async execute() {
-      return notImplemented("browser_interact");
-    },
-  }),
-  defineTool({
-    name: "browser_close",
-    label: "Browser close",
-    description: "Close a named browser session.",
-    promptSnippet: "browser_close: close a named browser session",
-    parameters: Type.Object({
-      session: sessionParameter,
+    defineTool({
+      name: "browser_close",
+      label: "Browser close",
+      description: "Close a named browser session.",
+      promptSnippet: "browser_close: close a named browser session",
+      parameters: Type.Object({
+        session: sessionParameter,
+      }),
+      async execute() {
+        return notImplemented("browser_close");
+      },
     }),
-    async execute() {
-      return notImplemented("browser_close");
-    },
-  }),
-] satisfies ToolDefinition[];
+  ] satisfies ToolDefinition[];
+}
+
+export const browserTools = createBrowserTools();
 
 export function registerBrowserTools(pi: Pick<ExtensionAPI, "registerTool">): void {
   for (const tool of browserTools) pi.registerTool(tool);

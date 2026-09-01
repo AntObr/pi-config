@@ -1,6 +1,6 @@
 # Pi web browser extension
 
-A Pi extension package for browser tools. This first ticket only registers the tool names and returns safe placeholder results. Playwright-backed behavior comes in later tickets.
+A Pi extension package for browser tools. `browser_navigate` is backed by Playwright Chromium. The remaining tools are registered and return safe placeholder results until their tickets land.
 
 ## Setup
 
@@ -55,4 +55,6 @@ An empty `allowedHosts` list allows any host unless `blockedHosts` matches. A no
 - `browser_interact`
 - `browser_close`
 
-For now each tool returns a "not implemented yet" result instead of launching Chromium.
+`browser_navigate` launches Chromium, opens the requested URL in a named session, and returns the final URL and page title. Sessions default to `default`, run headless unless configured otherwise, and use the configured navigation timeout unless the tool call supplies `timeoutMs`.
+
+The other tools still return a "not implemented yet" result.
