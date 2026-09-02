@@ -16,10 +16,10 @@ The extension does not install a browser binary for you. If navigation or search
 npx playwright install chromium
 ```
 
-Raw HTML captures and screenshots go under `.pi/web-browser-artifacts` by default. Keep that directory out of git:
+Raw HTML captures and screenshots go under `~/.pi/web-browser-artifacts` by default. Keep that directory out of git:
 
 ```gitignore
-.pi/web-browser-artifacts/
+web-browser-artifacts/
 ```
 
 ## Configuration
@@ -30,7 +30,7 @@ The extension reads `web-browser.json` from three places. Later files override e
 2. User config in `~/.pi/agent`, or `PI_CODING_AGENT_DIR` when set.
 3. Project config in `.pi` under the current project.
 
-With no config, the extension uses headless Chromium, Playwright's fixed default viewport for headless sessions, a dynamic native-window viewport for headed sessions, a 30 second navigation timeout, Google search, no host allow list, no host block list, and `.pi/web-browser-artifacts` for generated files.
+With no config, the extension uses headless Chromium, Playwright's fixed default viewport for headless sessions, a dynamic native-window viewport for headed sessions, a 30 second navigation timeout, Google search, no host allow list, no host block list, and `~/.pi/web-browser-artifacts` for generated files.
 
 ```json
 {
@@ -39,7 +39,7 @@ With no config, the extension uses headless Chromium, Playwright's fixed default
   "searchUrl": "https://www.google.com/search?q={query}",
   "allowedHosts": ["localhost", "*.example.com"],
   "blockedHosts": ["internal.example.com"],
-  "artifactDir": ".pi/web-browser-artifacts"
+  "artifactDir": "/Users/alice/.pi/web-browser-artifacts"
 }
 ```
 
@@ -50,7 +50,7 @@ Config keys:
 - `searchUrl`: URL template for `browser_search`. It must include `{query}`. The tool URL-encodes the query and replaces that token.
 - `allowedHosts`: host patterns that navigation may visit. Use exact hosts such as `example.com` or wildcard subdomains such as `*.example.com`.
 - `blockedHosts`: host patterns that navigation must not visit. This list wins over `allowedHosts`.
-- `artifactDir`: directory for generated screenshots and full raw HTML files. Relative paths resolve from the project cwd.
+- `artifactDir`: directory for generated screenshots and full raw HTML files. The built-in default is under `~/.pi`. Relative paths in config files resolve from the project cwd, so use an absolute path if you want the directory to ignore cwd.
 
 Host rules apply to `browser_navigate` and to the URL built by `browser_search`. An empty `allowedHosts` list allows any host unless `blockedHosts` matches. A non-empty `allowedHosts` list allows only matching hosts. `blockedHosts` always wins.
 

@@ -32,7 +32,7 @@ export const DEFAULT_BROWSER_CONFIG: BrowserConfig = {
   searchUrl: "https://www.google.com/search?q={query}",
   allowedHosts: [],
   blockedHosts: [],
-  artifactDir: join(CONFIG_DIR_NAME, "web-browser-artifacts"),
+  artifactDir: join(homedir(), CONFIG_DIR_NAME, "web-browser-artifacts"),
 };
 
 const packageDirectory = dirname(dirname(dirname(fileURLToPath(import.meta.url))));

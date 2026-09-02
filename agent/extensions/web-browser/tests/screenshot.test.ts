@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -86,10 +86,11 @@ test("screenshot saves a PNG artifact for the active named session and returns o
   assert.equal(resultDetails.session, "docs");
   assert.equal(resultDetails.url, "https://example.test/page");
   assert.equal(resultDetails.title, "Example page");
-  assert.equal(resultDetails.artifactPath, join(cwd, ".pi", "web-browser-artifacts", resultDetails.artifactFile as string));
+  assert.equal(resultDetails.artifactPath, join(homedir(), ".pi", "web-browser-artifacts", resultDetails.artifactFile as string));
   assert.match(resultDetails.artifactFile as string, /^screenshot-docs-.*\.png$/);
   assert.deepEqual(fake.screenshotCalls, [{ path: resultDetails.artifactPath as string, fullPage: true }]);
   assert.deepEqual(await readFile(resultDetails.artifactPath as string), pngBytes);
+  await rm(resultDetails.artifactPath as string);
   assert.equal(text(result), `Screenshot saved to ${resultDetails.artifactPath}.`);
   assert.doesNotMatch(text(result), /iVBOR|base64|89504e47/i);
 });

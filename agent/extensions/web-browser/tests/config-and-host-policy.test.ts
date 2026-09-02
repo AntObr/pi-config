@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -27,7 +27,7 @@ test("with no config files, built-in defaults are resolved", async () => {
 
   assert.deepEqual(config, {
     ...DEFAULT_BROWSER_CONFIG,
-    artifactDir: join(root, "project", ".pi", "web-browser-artifacts"),
+    artifactDir: join(homedir(), ".pi", "web-browser-artifacts"),
   });
   assert.doesNotThrow(() => assertUrlAllowed("https://example.com/docs", config));
 });
