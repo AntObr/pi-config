@@ -774,10 +774,29 @@ export class BrowserManager {
     const session = this.sessions.get(name);
     if (!session) return { status: "closed", session: name, existed: false };
 
+    await this.closeSession(session);
     this.sessions.delete(name);
-    await session.context.close();
-    await session.browser.close();
     return { status: "closed", session: name, existed: true };
+  }
+
+  async closeAll(): Promise<BrowserClosedDetails[]> {
+    const entries = [...this.sessions.entries()];
+
+    return Promise.all(
+      entries.map(async ([name, session]) => {
+        await this.closeSession(session);
+        this.sessions.delete(name);
+        return { status: "closed", session: name, existed: true } satisfies BrowserClosedDetails;
+      }),
+    );
+  }
+
+  private async closeSession(session: BrowserSession): Promise<void> {
+    try {
+      await session.context.close();
+    } finally {
+      await session.browser.close();
+    }
   }
 
   private resolveInteractionSelector(session: BrowserSession, request: InteractionRequest): string | undefined {
@@ -1069,6 +1088,13 @@ export function registerBrowserTools(pi: Pick<ExtensionAPI, "registerTool">): vo
   for (const tool of browserTools) pi.registerTool(tool);
 }
 
+export function registerBrowserShutdown(pi: Pick<ExtensionAPI, "on">, manager: Pick<BrowserManager, "closeAll"> = defaultBrowserManager): void {
+  pi.on("session_shutdown", async () => {
+    await manager.closeAll();
+  });
+}
+
 export default function webBrowserExtension(pi: ExtensionAPI): void {
   registerBrowserTools(pi);
+  registerBrowserShutdown(pi);
 }

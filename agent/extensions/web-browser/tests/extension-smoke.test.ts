@@ -33,21 +33,25 @@ test("extension registers the expected browser tools", () => {
   );
 });
 
-test("default export loads without using other Pi APIs", () => {
+test("default export registers tools and shutdown cleanup", () => {
   const registered: AnyToolDefinition[] = [];
+  const handlers: Record<string, Array<() => Promise<void>>> = {};
   const pi = new Proxy(
     {
       registerTool(tool: AnyToolDefinition) {
         registered.push(tool);
       },
+      on(event: string, handler: () => Promise<void>) {
+        handlers[event] = [...(handlers[event] ?? []), handler];
+      },
     },
     {
       get(target, property, receiver) {
-        if (property === "registerTool") return Reflect.get(target, property, receiver);
+        if (property === "registerTool" || property === "on") return Reflect.get(target, property, receiver);
         throw new Error(`Unexpected Pi API read: ${String(property)}`);
       },
     },
-  ) as Pick<ExtensionAPI, "registerTool"> as ExtensionAPI;
+  ) as Pick<ExtensionAPI, "registerTool" | "on"> as ExtensionAPI;
 
   webBrowserExtension(pi);
 
@@ -55,6 +59,7 @@ test("default export loads without using other Pi APIs", () => {
     registered.map((tool) => tool.name),
     expectedToolNames,
   );
+  assert.equal(handlers.session_shutdown?.length, 1);
 });
 
 test("browser_close is implemented", async () => {

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BrowserManager, createBrowserTools } from "../src/index.ts";
+import { BrowserManager, createBrowserTools, registerBrowserShutdown } from "../src/index.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type FakePage = {
   goto(url: string): Promise<void>;
@@ -79,7 +80,7 @@ function makeToolsFixture() {
   const fakeBrowser = makeFakeBrowser();
   const manager = new BrowserManager(fakeBrowser.browserType as never);
   const tools = createBrowserTools({ manager });
-  return { fakeBrowser, tools };
+  return { fakeBrowser, manager, tools };
 }
 
 test("named browser sessions keep independent page state", async () => {
@@ -105,6 +106,95 @@ test("omitting the session name uses the default session", async () => {
   const inspected = details(await executeNamedTool(tools, "browser_inspect", {}));
   assert.equal(inspected.session, "default");
   assert.equal(inspected.url, "https://example.test/default");
+});
+
+test("browser_close reports missing sessions without throwing", async () => {
+  const { fakeBrowser, tools } = makeToolsFixture();
+
+  const closed = details(await executeNamedTool(tools, "browser_close", { session: "missing" }));
+
+  assert.equal(closed.status, "closed");
+  assert.equal(closed.session, "missing");
+  assert.equal(closed.existed, false);
+  assert.deepEqual(fakeBrowser.closedContexts, []);
+  assert.deepEqual(fakeBrowser.closedBrowsers, []);
+});
+
+test("browser_close closes the requested named session only", async () => {
+  const { fakeBrowser, tools } = makeToolsFixture();
+
+  await executeNamedTool(tools, "browser_navigate", { session: "docs", url: "https://example.test/docs" });
+  await executeNamedTool(tools, "browser_navigate", { session: "app", url: "https://example.test/app" });
+
+  const closed = details(await executeNamedTool(tools, "browser_close", { session: "docs" }));
+
+  assert.equal(closed.status, "closed");
+  assert.equal(closed.session, "docs");
+  assert.equal(closed.existed, true);
+  assert.deepEqual(fakeBrowser.closedContexts, [1]);
+  assert.deepEqual(fakeBrowser.closedBrowsers, [1]);
+
+  const app = details(await executeNamedTool(tools, "browser_inspect", { session: "app" }));
+  assert.equal(app.url, "https://example.test/app");
+});
+
+test("navigating after close creates a fresh session", async () => {
+  const { fakeBrowser, tools } = makeToolsFixture();
+
+  await executeNamedTool(tools, "browser_navigate", { session: "docs", url: "https://example.test/one" });
+  await executeNamedTool(tools, "browser_close", { session: "docs" });
+  await executeNamedTool(tools, "browser_navigate", { session: "docs", url: "https://example.test/two" });
+
+  assert.deepEqual(fakeBrowser.closedContexts, [1]);
+  assert.deepEqual(fakeBrowser.closedBrowsers, [1]);
+  assert.equal(fakeBrowser.launches.length, 2);
+
+  const inspected = details(await executeNamedTool(tools, "browser_inspect", { session: "docs" }));
+  assert.equal(inspected.url, "https://example.test/two");
+});
+
+test("session shutdown closes every open session", async () => {
+  const { fakeBrowser, manager, tools } = makeToolsFixture();
+  let handler: (() => Promise<void>) | undefined;
+
+  registerBrowserShutdown(
+    {
+      on(event, registeredHandler) {
+        assert.equal(event, "session_shutdown");
+        handler = registeredHandler as () => Promise<void>;
+      },
+    } as Pick<ExtensionAPI, "on">,
+    manager,
+  );
+
+  await executeNamedTool(tools, "browser_navigate", { session: "docs", url: "https://example.test/docs" });
+  await executeNamedTool(tools, "browser_navigate", { session: "app", url: "https://example.test/app" });
+
+  assert.ok(handler);
+  await handler();
+
+  assert.deepEqual(fakeBrowser.closedContexts, [1, 2]);
+  assert.deepEqual(fakeBrowser.closedBrowsers, [1, 2]);
+  await assert.rejects(() => manager.inspect("docs"), /navigate first/);
+});
+
+test("closeAll closes every open session and is idempotent", async () => {
+  const { fakeBrowser, manager, tools } = makeToolsFixture();
+
+  await executeNamedTool(tools, "browser_navigate", { session: "docs", url: "https://example.test/docs" });
+  await executeNamedTool(tools, "browser_navigate", { session: "app", url: "https://example.test/app" });
+
+  const closed = await manager.closeAll();
+
+  assert.deepEqual(closed, [
+    { status: "closed", session: "docs", existed: true },
+    { status: "closed", session: "app", existed: true },
+  ]);
+  assert.deepEqual(fakeBrowser.closedContexts, [1, 2]);
+  assert.deepEqual(fakeBrowser.closedBrowsers, [1, 2]);
+  await assert.rejects(() => manager.inspect("docs"), /navigate first/);
+
+  assert.deepEqual(await manager.closeAll(), []);
 });
 
 test("headless mode is fixed for an existing session until it closes", async () => {
