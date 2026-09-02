@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +39,23 @@ type BrowserInspectionUnavailableDetails = {
 type BrowserInteractionUnavailableDetails = {
   status: "interaction_unavailable";
   reason: string;
+};
+
+type BrowserRawHtmlUnavailableDetails = {
+  status: "raw_html_unavailable";
+  reason: string;
+};
+
+type BrowserRawHtmlDetails = {
+  status: "captured";
+  session: string;
+  url: string;
+  title: string;
+  selector?: string;
+  bytes: number;
+  truncated: boolean;
+  artifactPath?: string;
+  artifactFile?: string;
 };
 
 type BrowserInteractedDetails = {
@@ -135,6 +152,13 @@ class BrowserInteractionError extends Error {
   }
 }
 
+class BrowserRawHtmlError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserRawHtmlError";
+  }
+}
+
 const packageDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const sessionParameter = Type.Optional(
@@ -182,17 +206,27 @@ function interactionUnavailableResult(error: BrowserInteractionError): AgentTool
   return textResult(error.message, { status: "interaction_unavailable", reason: error.message });
 }
 
+function rawHtmlUnavailableResult(error: BrowserRawHtmlError): AgentToolResult<BrowserRawHtmlUnavailableDetails> {
+  return textResult(error.message, { status: "raw_html_unavailable", reason: error.message });
+}
+
 function toolErrorResult(
   error: unknown,
 ):
   | AgentToolResult<
-      ConfigErrorDetails | NavigationDeniedDetails | BrowserInstallRequiredDetails | BrowserInspectionUnavailableDetails | BrowserInteractionUnavailableDetails
+      | ConfigErrorDetails
+      | NavigationDeniedDetails
+      | BrowserInstallRequiredDetails
+      | BrowserInspectionUnavailableDetails
+      | BrowserInteractionUnavailableDetails
+      | BrowserRawHtmlUnavailableDetails
     >
   | undefined {
   if (error instanceof BrowserConfigError) return configErrorResult(error);
   if (error instanceof NavigationPolicyError) return navigationDeniedResult(error);
   if (error instanceof BrowserInspectionError) return inspectionUnavailableResult(error);
   if (error instanceof BrowserInteractionError) return interactionUnavailableResult(error);
+  if (error instanceof BrowserRawHtmlError) return rawHtmlUnavailableResult(error);
   if (error instanceof Error && isMissingChromiumError(error)) return browserInstallRequiredResult(error);
   return undefined;
 }
@@ -364,7 +398,7 @@ type PageLike = {
   goto(url: string, options: { waitUntil: "load"; timeout: number }): Promise<unknown>;
   url(): string;
   title(): Promise<string>;
-  evaluate<R>(pageFunction: () => R): Promise<R>;
+  evaluate<R, Arg = undefined>(pageFunction: (arg: Arg) => R, arg?: Arg): Promise<R>;
   locator(selector: string): LocatorLike;
   keyboard?: { press(value: string): Promise<unknown> };
 };
@@ -475,6 +509,23 @@ function inspectPageInBrowser(): InspectedPagePayload {
 }
 
 const ELEMENT_ID_SCOPE = "latest inspection only; inspect again after navigation or page changes";
+const RAW_HTML_RESPONSE_LIMIT_BYTES = 50_000;
+
+type RawHtmlPayload = {
+  html?: string;
+  selectorFound: boolean;
+};
+
+function rawHtmlInBrowser(selector?: string): RawHtmlPayload {
+  if (selector !== undefined) {
+    const element = document.querySelector(selector);
+    if (!element) return { selectorFound: false };
+    return { selectorFound: true, html: element.outerHTML };
+  }
+
+  const doctype = document.doctype ? new XMLSerializer().serializeToString(document.doctype) + "\n" : "";
+  return { selectorFound: true, html: doctype + document.documentElement.outerHTML };
+}
 
 function formatInspection(details: InspectionDetails): string {
   const lines = [`URL: ${details.url}`, `Title: ${details.title || "(untitled)"}`, "", "Visible text:", details.text || "(no visible text)", "", "Interactable elements:"];
@@ -510,6 +561,51 @@ function missingInteractionTargetError(action: InteractionAction): BrowserIntera
 function formatInteraction(details: BrowserInteractedDetails): string {
   const target = details.elementId ? `element ${details.elementId}` : details.selector ? `selector ${details.selector}` : "page keyboard";
   return `Ran ${details.action} on ${target}. Inspect again before using element IDs.`;
+}
+
+function rawHtmlArtifactFile(session: string): string {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeSession = session.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return `raw-html-${safeSession}-${timestamp}.html`;
+}
+
+function byteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const buffer = Buffer.from(value, "utf8");
+  if (buffer.byteLength <= maxBytes) return value;
+  return buffer.subarray(0, maxBytes).toString("utf8");
+}
+
+async function formatRawHtmlResult(
+  captured: { session: string; url: string; title: string; selector?: string; html: string },
+  artifactDir: string,
+): Promise<AgentToolResult<BrowserRawHtmlDetails>> {
+  const bytes = byteLength(captured.html);
+  const truncated = bytes > RAW_HTML_RESPONSE_LIMIT_BYTES;
+  const details: BrowserRawHtmlDetails = {
+    status: "captured",
+    session: captured.session,
+    url: captured.url,
+    title: captured.title,
+    ...(captured.selector !== undefined ? { selector: captured.selector } : {}),
+    bytes,
+    truncated,
+  };
+
+  if (!truncated) return textResult(captured.html, details);
+
+  await mkdir(artifactDir, { recursive: true });
+  const artifactFile = rawHtmlArtifactFile(captured.session);
+  const artifactPath = join(artifactDir, artifactFile);
+  await writeFile(artifactPath, captured.html, "utf8");
+
+  return textResult(
+    `${truncateUtf8(captured.html, RAW_HTML_RESPONSE_LIMIT_BYTES)}\n\n[Raw HTML truncated from ${bytes} bytes. Full HTML saved to ${artifactPath}.]`,
+    { ...details, artifactPath, artifactFile },
+  );
 }
 
 function requiredInteractionLocator(action: InteractionAction, locator: LocatorLike | undefined): LocatorLike {
@@ -549,6 +645,21 @@ export class BrowserManager {
       title: await session.page.title(),
       text: payload.text,
       elements,
+    };
+  }
+
+  async rawHtml(name: string, selector?: string): Promise<{ url: string; title: string; html: string }> {
+    const session = this.sessions.get(name);
+    if (!session) throw new BrowserRawHtmlError(`Cannot capture raw HTML for browser session ${name}: navigate first.`);
+
+    if (selector === "") throw new BrowserRawHtmlError(`Cannot capture raw HTML: selector "" was not found.`);
+
+    const payload = await session.page.evaluate(rawHtmlInBrowser, selector);
+    if (!payload.selectorFound) throw new BrowserRawHtmlError(`Cannot capture raw HTML: selector ${selector} was not found.`);
+    return {
+      url: session.page.url(),
+      title: await session.page.title(),
+      html: payload.html ?? "",
     };
   }
 
@@ -760,8 +871,17 @@ export function createBrowserTools(dependencies: BrowserToolDependencies = {}): 
         session: sessionParameter,
         selector: Type.Optional(Type.String({ description: "Optional selector to capture." })),
       }),
-      async execute() {
-        return notImplemented("browser_raw_html");
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+        try {
+          const config = await resolveConfigForTool(ctx);
+          const session = params.session ?? "default";
+          const captured = await manager.rawHtml(session, params.selector);
+          return formatRawHtmlResult({ session, selector: params.selector, ...captured }, config.artifactDir);
+        } catch (error) {
+          const result = toolErrorResult(error);
+          if (result) return result;
+          throw error;
+        }
       },
     }),
     defineTool({
