@@ -8,6 +8,7 @@ agent/auth.json
 # Pi runtime state
 agent/sessions/
 agent/subagents/runs/
+pi-acp/
 
 # Machine-specific config
 agent/trust.json
@@ -15,6 +16,7 @@ agent/settings.local.json
 
 # Generated/cache-like files
 agent/models-store.json
+node_modules/
 
 # Logs and temp files
 *.log
