@@ -57,19 +57,18 @@ test("default export loads without using other Pi APIs", () => {
   );
 });
 
-test("non-navigation tools return clear not implemented results", async () => {
+test("tools not built yet return clear not implemented results", async () => {
   assert.equal(browserTools.length, expectedToolNames.length);
 
   const paramsByTool: Record<string, Record<string, unknown>> = {
     browser_search: { query: "example" },
-    browser_inspect: {},
     browser_raw_html: {},
     browser_screenshot: {},
     browser_interact: { action: "click", selector: "button" },
     browser_close: {},
   };
 
-  for (const tool of browserTools.filter((tool) => tool.name !== "browser_navigate") as AnyToolDefinition[]) {
+  for (const tool of browserTools.filter((tool) => !["browser_navigate", "browser_inspect"].includes(tool.name)) as AnyToolDefinition[]) {
     const result = await tool.execute("test-call", paramsByTool[tool.name] ?? {}, undefined, undefined, { cwd: process.cwd() } as never);
     assert.equal(result.details.status, "not_implemented");
     assert.equal(result.details.tool, tool.name);

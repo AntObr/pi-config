@@ -31,6 +31,32 @@ type BrowserInstallRequiredDetails = {
   reason: string;
 };
 
+type BrowserInspectionUnavailableDetails = {
+  status: "inspection_unavailable";
+  reason: string;
+};
+
+type InspectElementDetails = {
+  id: string;
+  tag: string;
+  type?: string;
+  text?: string;
+  label?: string;
+  href?: string;
+  selectors: string[];
+};
+
+type InspectionDetails = {
+  status: "inspected";
+  session: string;
+  inspectionId: number;
+  elementIdScope: string;
+  url: string;
+  title: string;
+  text: string;
+  elements: InspectElementDetails[];
+};
+
 type ConfigErrorDetails = {
   status: "config_error";
   reason: string;
@@ -78,6 +104,13 @@ class NavigationPolicyError extends Error {
   }
 }
 
+class BrowserInspectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserInspectionError";
+  }
+}
+
 const packageDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const sessionParameter = Type.Optional(
@@ -117,11 +150,18 @@ function browserInstallRequiredResult(error: Error): AgentToolResult<BrowserInst
   return textResult(message, { status: "browser_install_required", reason: error.message });
 }
 
+function inspectionUnavailableResult(error: BrowserInspectionError): AgentToolResult<BrowserInspectionUnavailableDetails> {
+  return textResult(error.message, { status: "inspection_unavailable", reason: error.message });
+}
+
 function toolErrorResult(
   error: unknown,
-): AgentToolResult<ConfigErrorDetails | NavigationDeniedDetails | BrowserInstallRequiredDetails> | undefined {
+):
+  | AgentToolResult<ConfigErrorDetails | NavigationDeniedDetails | BrowserInstallRequiredDetails | BrowserInspectionUnavailableDetails>
+  | undefined {
   if (error instanceof BrowserConfigError) return configErrorResult(error);
   if (error instanceof NavigationPolicyError) return navigationDeniedResult(error);
+  if (error instanceof BrowserInspectionError) return inspectionUnavailableResult(error);
   if (error instanceof Error && isMissingChromiumError(error)) return browserInstallRequiredResult(error);
   return undefined;
 }
@@ -276,17 +316,143 @@ type BrowserContextLike = {
   close(): Promise<void>;
 };
 
+type InspectedPagePayload = {
+  text: string;
+  elements: Array<Omit<InspectElementDetails, "id">>;
+};
+
 type PageLike = {
   goto(url: string, options: { waitUntil: "load"; timeout: number }): Promise<unknown>;
   url(): string;
   title(): Promise<string>;
+  evaluate<R>(pageFunction: () => R): Promise<R>;
 };
 
 type BrowserSession = {
   browser: BrowserLike;
   context: BrowserContextLike;
   page: PageLike;
+  inspectionSequence: number;
 };
+
+function inspectPageInBrowser(): InspectedPagePayload {
+  const maxTextLength = 8_000;
+  const selector = "a[href], button, input, select, textarea";
+
+  function normalizeText(value: string | null | undefined): string | undefined {
+    const text = value?.replace(/\s+/g, " ").trim();
+    return text ? text.slice(0, 200) : undefined;
+  }
+
+  function cssEscape(value: string): string {
+    const escape = (globalThis as typeof globalThis & { CSS?: { escape?: (text: string) => string } }).CSS?.escape;
+    if (escape) return escape(value);
+    return value.replace(/^-?\d|[^a-zA-Z0-9_-]/g, (character) => `\\${character.codePointAt(0)?.toString(16)} `);
+  }
+
+  function quoted(value: string): string {
+    return `"${value.replace(/(["\\])/g, "\\$1")}"`;
+  }
+
+  function isUsable(element: Element): boolean {
+    if (!(element instanceof HTMLElement)) return false;
+    const style = window.getComputedStyle(element);
+    if (style.visibility === "hidden" || style.display === "none") return false;
+    if (element.matches("input[type='hidden'], [hidden], [aria-hidden='true']")) return false;
+    return element.getClientRects().length > 0;
+  }
+
+  function labelFor(element: Element): string | undefined {
+    if (!(element instanceof HTMLElement)) return undefined;
+    const ariaLabel = normalizeText(element.getAttribute("aria-label"));
+    if (ariaLabel) return ariaLabel;
+    const labelledBy = element.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      const labelledText = normalizeText(
+        labelledBy
+          .split(/\s+/)
+          .map((id) => document.getElementById(id)?.innerText)
+          .filter(Boolean)
+          .join(" "),
+      );
+      if (labelledText) return labelledText;
+    }
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+      if (element.id) {
+        const explicitLabel = normalizeText(document.querySelector(`label[for="${cssEscape(element.id)}"]`)?.textContent);
+        if (explicitLabel) return explicitLabel;
+      }
+      const wrappedLabel = normalizeText(element.closest("label")?.textContent);
+      if (wrappedLabel) return wrappedLabel;
+      const placeholder = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? normalizeText(element.placeholder) : undefined;
+      if (placeholder) return placeholder;
+      const name = normalizeText(element.getAttribute("name"));
+      if (name) return name;
+    }
+    return undefined;
+  }
+
+  function selectorsFor(element: Element, text: string | undefined, label: string | undefined): string[] {
+    const selectors: string[] = [];
+    const tag = element.tagName.toLowerCase();
+    const id = element.getAttribute("id");
+    if (id) selectors.push(`#${cssEscape(id)}`);
+    for (const attr of ["data-testid", "data-test", "data-cy", "name", "placeholder", "aria-label"] as const) {
+      const value = element.getAttribute(attr);
+      if (value) selectors.push(`${tag}[${attr}=${quoted(value)}]`);
+    }
+    if (label && element.closest("label")) selectors.push(`label:has-text(${quoted(label)}) ${tag}`);
+    if (element instanceof HTMLAnchorElement && element.href) selectors.push(`a[href=${quoted(element.href)}]`);
+    if ((tag === "button" || tag === "a") && text) selectors.push(`${tag}:has-text(${quoted(text)})`);
+    if (label && selectors.length === 0) selectors.push(`${tag}:near(:text(${quoted(label)}))`);
+    return [...new Set(selectors)].slice(0, 4);
+  }
+
+  const text = (document.body?.innerText ?? "").replace(/\n{3,}/g, "\n\n").trim().slice(0, maxTextLength);
+  const elements = Array.from(document.querySelectorAll(selector))
+    .filter(isUsable)
+    .map((element) => {
+      const tag = element.tagName.toLowerCase();
+      const text = normalizeText(element.textContent);
+      const label = labelFor(element);
+      const type = element instanceof HTMLInputElement ? element.type : undefined;
+      const href = element instanceof HTMLAnchorElement ? element.href : undefined;
+      return {
+        tag,
+        ...(type ? { type } : {}),
+        ...(text ? { text } : {}),
+        ...(label ? { label } : {}),
+        ...(href ? { href } : {}),
+        selectors: selectorsFor(element, text, label),
+      };
+    });
+
+  return { text, elements };
+}
+
+const ELEMENT_ID_SCOPE = "latest inspection only; inspect again after navigation or page changes";
+
+function formatInspection(details: InspectionDetails): string {
+  const lines = [`URL: ${details.url}`, `Title: ${details.title || "(untitled)"}`, "", "Visible text:", details.text || "(no visible text)", "", "Interactable elements:"];
+  if (details.elements.length === 0) {
+    lines.push("(none found)");
+  } else {
+    for (const element of details.elements) {
+      const name = element.text ?? element.label ?? element.href ?? element.tag;
+      const parts = [`[${element.id}]`, element.tag];
+      if (element.type) parts.push(`type=${element.type}`);
+      parts.push(quotedForReport(name));
+      if (element.selectors.length > 0) parts.push(`selectors: ${element.selectors.join(", ")}`);
+      lines.push(parts.join(" "));
+    }
+  }
+  lines.push("", `Element IDs are scoped to the ${ELEMENT_ID_SCOPE}.`);
+  return lines.join("\n");
+}
+
+function quotedForReport(value: string): string {
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
 
 export class BrowserManager {
   private sessions = new Map<string, BrowserSession>();
@@ -302,6 +468,24 @@ export class BrowserManager {
     return { url: session.page.url(), title: await session.page.title() };
   }
 
+  async inspect(name: string): Promise<Omit<InspectionDetails, "status" | "session" | "elementIdScope">> {
+    const session = this.sessions.get(name);
+    if (!session) throw new BrowserInspectionError(`Cannot inspect browser session ${name}: navigate first.`);
+
+    const payload = await session.page.evaluate(inspectPageInBrowser);
+    const inspectionId = ++session.inspectionSequence;
+    return {
+      inspectionId,
+      url: session.page.url(),
+      title: await session.page.title(),
+      text: payload.text,
+      elements: payload.elements.map((element, index) => ({
+        id: `e${index + 1}`,
+        ...element,
+      })),
+    };
+  }
+
   private async getSession(name: string, headless: boolean): Promise<BrowserSession> {
     const existing = this.sessions.get(name);
     if (existing) return existing;
@@ -309,7 +493,7 @@ export class BrowserManager {
     const browser = await this.browserType.launch({ headless });
     const context = await browser.newContext();
     const page = await context.newPage();
-    const session = { browser, context, page };
+    const session = { browser, context, page, inspectionSequence: 0 };
     this.sessions.set(name, session);
     return session;
   }
@@ -405,8 +589,22 @@ export function createBrowserTools(dependencies: BrowserToolDependencies = {}): 
       parameters: Type.Object({
         session: sessionParameter,
       }),
-      async execute() {
-        return notImplemented("browser_inspect");
+      async execute(_toolCallId, params): Promise<AgentToolResult<unknown>> {
+        try {
+          const session = params.session ?? "default";
+          const inspected = await manager.inspect(session);
+          const details = {
+            status: "inspected",
+            session,
+            elementIdScope: ELEMENT_ID_SCOPE,
+            ...inspected,
+          } satisfies InspectionDetails;
+          return textResult(formatInspection(details), details);
+        } catch (error) {
+          const result = toolErrorResult(error);
+          if (result) return result;
+          throw error;
+        }
       },
     }),
     defineTool({
