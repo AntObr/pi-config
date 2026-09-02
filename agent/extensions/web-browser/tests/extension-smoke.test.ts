@@ -61,13 +61,12 @@ test("tools not built yet return clear not implemented results", async () => {
   assert.equal(browserTools.length, expectedToolNames.length);
 
   const paramsByTool: Record<string, Record<string, unknown>> = {
-    browser_search: { query: "example" },
     browser_raw_html: {},
     browser_screenshot: {},
     browser_close: {},
   };
 
-  for (const tool of browserTools.filter((tool) => !["browser_navigate", "browser_inspect", "browser_interact"].includes(tool.name)) as AnyToolDefinition[]) {
+  for (const tool of browserTools.filter((tool) => !["browser_navigate", "browser_search", "browser_inspect", "browser_interact"].includes(tool.name)) as AnyToolDefinition[]) {
     const result = await tool.execute("test-call", paramsByTool[tool.name] ?? {}, undefined, undefined, { cwd: process.cwd() } as never);
     assert.equal(result.details.status, "not_implemented");
     assert.equal(result.details.tool, tool.name);

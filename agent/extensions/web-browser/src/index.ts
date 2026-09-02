@@ -647,10 +647,9 @@ async function resolveConfigForTool(ctx?: ExtensionContext): Promise<BrowserConf
 async function checkedNavigationResult(
   params: { url: string; session?: string; headless?: boolean; timeoutMs?: number },
   manager: BrowserManager,
-  ctx?: ExtensionContext,
+  config: BrowserConfig,
 ): Promise<AgentToolResult<unknown>> {
   try {
-    const config = await resolveConfigForTool(ctx);
     assertUrlAllowed(params.url, config);
     const session = params.session ?? "default";
     const timeoutMs = params.timeoutMs ?? config.navigationTimeoutMs;
@@ -694,7 +693,14 @@ export function createBrowserTools(dependencies: BrowserToolDependencies = {}): 
         timeoutMs: navigationTimeoutParameter,
       }),
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        return checkedNavigationResult(params, manager, ctx);
+        try {
+          const config = await resolveConfigForTool(ctx);
+          return checkedNavigationResult(params, manager, config);
+        } catch (error) {
+          const result = toolErrorResult(error);
+          if (result) return result;
+          throw error;
+        }
       },
     }),
     defineTool({
@@ -711,8 +717,7 @@ export function createBrowserTools(dependencies: BrowserToolDependencies = {}): 
         try {
           const config = await resolveConfigForTool(ctx);
           const url = buildSearchUrl(params.query, config);
-          assertUrlAllowed(url, config);
-          return notImplemented("browser_search");
+          return checkedNavigationResult({ url, session: params.session, timeoutMs: params.timeoutMs }, manager, config);
         } catch (error) {
           const result = toolErrorResult(error);
           if (result) return result;
