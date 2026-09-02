@@ -19,6 +19,7 @@ type NavigationLoadedDetails = {
   url: string;
   title: string;
   timeoutMs: number;
+  dynamicViewport: boolean;
 };
 
 type BrowserClosedDetails = {
@@ -412,8 +413,12 @@ type BrowserTypeLike = {
 };
 
 type BrowserLike = {
-  newContext(): Promise<BrowserContextLike>;
+  newContext(options?: BrowserContextOptionsLike): Promise<BrowserContextLike>;
   close(): Promise<void>;
+};
+
+type BrowserContextOptionsLike = {
+  viewport?: null;
 };
 
 type BrowserContextLike = {
@@ -453,6 +458,7 @@ type BrowserSession = {
     elements: InspectElementDetails[];
   };
   headless: boolean;
+  dynamicViewport: boolean;
 };
 
 function formatClose(details: BrowserClosedDetails): string {
@@ -528,7 +534,10 @@ function inspectPageInBrowser(): InspectedPagePayload {
       if (value) selectors.push(`${tag}[${attr}=${quoted(value)}]`);
     }
     if (label && element.closest("label")) selectors.push(`label:has-text(${quoted(label)}) ${tag}`);
-    if (element instanceof HTMLAnchorElement && element.href) selectors.push(`a[href=${quoted(element.href)}]`);
+    if (element instanceof HTMLAnchorElement) {
+      const href = element.getAttribute("href");
+      if (href) selectors.push(`a[href=${quoted(href)}]`);
+    }
     if ((tag === "button" || tag === "a") && text) selectors.push(`${tag}:has-text(${quoted(text)})`);
     if (label && selectors.length === 0) selectors.push(`${tag}:near(:text(${quoted(label)}))`);
     return [...new Set(selectors)].slice(0, 4);
@@ -678,12 +687,12 @@ export class BrowserManager {
 
   async navigate(
     url: string,
-    options: { session: string; requestedHeadless?: boolean; defaultHeadless: boolean; timeoutMs: number },
-  ): Promise<{ url: string; title: string }> {
-    const session = await this.getSession(options.session, options.requestedHeadless, options.defaultHeadless);
+    options: { session: string; requestedHeadless?: boolean; defaultHeadless: boolean; timeoutMs: number; dynamicViewport?: boolean },
+  ): Promise<{ url: string; title: string; dynamicViewport: boolean }> {
+    const session = await this.getSession(options.session, options.requestedHeadless, options.defaultHeadless, options.dynamicViewport);
     await session.page.goto(url, { waitUntil: "load", timeout: options.timeoutMs });
     session.latestInspection = undefined;
-    return { url: session.page.url(), title: await session.page.title() };
+    return { url: session.page.url(), title: await session.page.title(), dynamicViewport: session.dynamicViewport };
   }
 
   async inspect(name: string): Promise<Omit<InspectionDetails, "status" | "session" | "elementIdScope">> {
@@ -854,7 +863,12 @@ export class BrowserManager {
     }
   }
 
-  private async getSession(name: string, requestedHeadless: boolean | undefined, defaultHeadless: boolean): Promise<BrowserSession> {
+  private async getSession(
+    name: string,
+    requestedHeadless: boolean | undefined,
+    defaultHeadless: boolean,
+    requestedDynamicViewport: boolean | undefined,
+  ): Promise<BrowserSession> {
     const existing = this.sessions.get(name);
     if (existing) {
       if (requestedHeadless !== undefined && requestedHeadless !== existing.headless) {
@@ -862,14 +876,20 @@ export class BrowserManager {
           `Browser session ${name} is already ${existing.headless ? "headless" : "headed"}. Close it before changing mode.`,
         );
       }
+      if (requestedDynamicViewport !== undefined && requestedDynamicViewport !== existing.dynamicViewport) {
+        throw new BrowserSessionModeConflictError(
+          `Browser session ${name} already uses ${existing.dynamicViewport ? "a dynamic" : "a fixed"} viewport. Close it before changing viewport mode.`,
+        );
+      }
       return existing;
     }
 
     const headless = requestedHeadless ?? defaultHeadless;
+    const dynamicViewport = requestedDynamicViewport ?? !headless;
     const browser = await this.browserType.launch({ headless });
-    const context = await browser.newContext();
+    const context = await browser.newContext(dynamicViewport ? { viewport: null } : undefined);
     const page = await context.newPage();
-    const session = { browser, context, page, inspectionSequence: 0, headless };
+    const session = { browser, context, page, inspectionSequence: 0, headless, dynamicViewport };
     this.sessions.set(name, session);
     return session;
   }
@@ -882,7 +902,7 @@ async function resolveConfigForTool(ctx?: ExtensionContext): Promise<BrowserConf
 }
 
 async function checkedNavigationResult(
-  params: { url: string; session?: string; headless?: boolean; timeoutMs?: number },
+  params: { url: string; session?: string; headless?: boolean; timeoutMs?: number; dynamicViewport?: boolean },
   manager: BrowserManager,
   config: BrowserConfig,
 ): Promise<AgentToolResult<unknown>> {
@@ -895,6 +915,7 @@ async function checkedNavigationResult(
       requestedHeadless: params.headless,
       defaultHeadless: config.headless,
       timeoutMs,
+      dynamicViewport: params.dynamicViewport,
     });
     return textResult(`Loaded ${loaded.title || loaded.url} at ${loaded.url}.`, {
       status: "loaded",
@@ -902,6 +923,7 @@ async function checkedNavigationResult(
       url: loaded.url,
       title: loaded.title,
       timeoutMs,
+      dynamicViewport: loaded.dynamicViewport,
     } satisfies NavigationLoadedDetails);
   } catch (error) {
     const result = toolErrorResult(error);
@@ -927,6 +949,9 @@ export function createBrowserTools(dependencies: BrowserToolDependencies = {}): 
         session: sessionParameter,
         headless: Type.Optional(
           Type.Boolean({ description: "Choose headless mode when creating a new session." }),
+        ),
+        dynamicViewport: Type.Optional(
+          Type.Boolean({ description: "Use the headed window's native viewport instead of Playwright's fixed viewport when creating a new session." }),
         ),
         timeoutMs: navigationTimeoutParameter,
       }),

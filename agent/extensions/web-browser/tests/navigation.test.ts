@@ -24,6 +24,7 @@ type FakeBrowserOptions = {
 
 function makeFakeBrowser(options: FakeBrowserOptions = {}) {
   const launches: Array<{ headless: boolean }> = [];
+  const contexts: Array<{ viewport?: null } | undefined> = [];
   const pages: FakePage[] = [];
   const browserType = {
     async launch(launchOptions: { headless: boolean }) {
@@ -49,7 +50,8 @@ function makeFakeBrowser(options: FakeBrowserOptions = {}) {
       };
       pages.push(page);
       return {
-        async newContext() {
+        async newContext(contextOptions?: { viewport?: null }) {
+          contexts.push(contextOptions);
           return {
             async newPage() {
               return page;
@@ -61,7 +63,7 @@ function makeFakeBrowser(options: FakeBrowserOptions = {}) {
       };
     },
   };
-  return { browserType, launches, pages };
+  return { browserType, launches, contexts, pages };
 }
 
 async function tempDir(): Promise<string> {
@@ -168,6 +170,52 @@ test("navigate starts sessions headless by default and accepts a per-session ove
   );
 
   assert.deepEqual(fake.launches, [{ headless: true }, { headless: false }]);
+});
+
+test("navigate can create a headed session with the browser window's dynamic viewport", async () => {
+  const fake = makeFakeBrowser({ title: "Dynamic", finalUrl: "https://example.test/" });
+  const manager = new BrowserManager(fake.browserType as never);
+  const [navigate] = createBrowserTools({ manager });
+
+  const result = await navigate.execute(
+    "test-call",
+    { url: "https://example.test/", session: "headed-dynamic", headless: false, dynamicViewport: true },
+    undefined,
+    undefined,
+    { cwd: process.cwd() } as never,
+  );
+
+  assert.deepEqual(fake.launches, [{ headless: false }]);
+  assert.deepEqual(fake.contexts, [{ viewport: null }]);
+  assert.equal(details(result).dynamicViewport, true);
+});
+
+test("navigate keeps a fixed viewport for headless sessions when dynamicViewport is not requested", async () => {
+  const fake = makeFakeBrowser({ title: "Fixed", finalUrl: "https://example.test/" });
+  const manager = new BrowserManager(fake.browserType as never);
+  const [navigate] = createBrowserTools({ manager });
+
+  const result = await navigate.execute("test-call", { url: "https://example.test/" }, undefined, undefined, { cwd: process.cwd() } as never);
+
+  assert.deepEqual(fake.contexts, [undefined]);
+  assert.equal(details(result).dynamicViewport, false);
+});
+
+test("navigate uses a dynamic viewport by default for headed sessions", async () => {
+  const fake = makeFakeBrowser({ title: "Headed dynamic", finalUrl: "https://example.test/" });
+  const manager = new BrowserManager(fake.browserType as never);
+  const [navigate] = createBrowserTools({ manager });
+
+  const result = await navigate.execute(
+    "test-call",
+    { url: "https://example.test/", session: "headed", headless: false },
+    undefined,
+    undefined,
+    { cwd: process.cwd() } as never,
+  );
+
+  assert.deepEqual(fake.contexts, [{ viewport: null }]);
+  assert.equal(details(result).dynamicViewport, true);
 });
 
 test("navigate uses configured timeout and per-call override", async () => {

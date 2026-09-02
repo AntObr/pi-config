@@ -30,7 +30,7 @@ The extension reads `web-browser.json` from three places. Later files override e
 2. User config in `~/.pi/agent`, or `PI_CODING_AGENT_DIR` when set.
 3. Project config in `.pi` under the current project.
 
-With no config, the extension uses headless Chromium, a 30 second navigation timeout, Google search, no host allow list, no host block list, and `.pi/web-browser-artifacts` for generated files.
+With no config, the extension uses headless Chromium, Playwright's fixed default viewport for headless sessions, a dynamic native-window viewport for headed sessions, a 30 second navigation timeout, Google search, no host allow list, no host block list, and `.pi/web-browser-artifacts` for generated files.
 
 ```json
 {
@@ -67,6 +67,7 @@ Parameters:
 - `url` string, required. URL to open.
 - `session` string, optional. Defaults to `default`.
 - `headless` boolean, optional. Chooses headed or headless mode when creating a new session. Existing sessions keep their original mode.
+- `dynamicViewport` boolean, optional. When true, creates the browser context with `viewport: null`, so a headed page uses the browser window's native viewport instead of Playwright's fixed default. When omitted, headed sessions default to dynamic viewport and headless sessions default to fixed viewport. Existing sessions keep their original viewport mode.
 - `timeoutMs` number, optional. Navigation timeout in milliseconds.
 
 Success details:
@@ -78,6 +79,7 @@ Success details:
   url: string;
   title: string;
   timeoutMs: number;
+  dynamicViewport: boolean;
 }
 ```
 
