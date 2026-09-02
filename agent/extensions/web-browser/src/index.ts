@@ -36,6 +36,23 @@ type BrowserInspectionUnavailableDetails = {
   reason: string;
 };
 
+type BrowserInteractionUnavailableDetails = {
+  status: "interaction_unavailable";
+  reason: string;
+};
+
+type BrowserInteractedDetails = {
+  status: "interacted";
+  session: string;
+  action: InteractionAction;
+  selector?: string;
+  elementId?: string;
+  value?: string;
+};
+
+type InteractionAction = "click" | "type" | "fill" | "press" | "select";
+type InteractionRequest = { action: InteractionAction; elementId?: string; selector?: string; value?: string };
+
 type InspectElementDetails = {
   id: string;
   tag: string;
@@ -111,6 +128,13 @@ class BrowserInspectionError extends Error {
   }
 }
 
+class BrowserInteractionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserInteractionError";
+  }
+}
+
 const packageDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const sessionParameter = Type.Optional(
@@ -154,14 +178,21 @@ function inspectionUnavailableResult(error: BrowserInspectionError): AgentToolRe
   return textResult(error.message, { status: "inspection_unavailable", reason: error.message });
 }
 
+function interactionUnavailableResult(error: BrowserInteractionError): AgentToolResult<BrowserInteractionUnavailableDetails> {
+  return textResult(error.message, { status: "interaction_unavailable", reason: error.message });
+}
+
 function toolErrorResult(
   error: unknown,
 ):
-  | AgentToolResult<ConfigErrorDetails | NavigationDeniedDetails | BrowserInstallRequiredDetails | BrowserInspectionUnavailableDetails>
+  | AgentToolResult<
+      ConfigErrorDetails | NavigationDeniedDetails | BrowserInstallRequiredDetails | BrowserInspectionUnavailableDetails | BrowserInteractionUnavailableDetails
+    >
   | undefined {
   if (error instanceof BrowserConfigError) return configErrorResult(error);
   if (error instanceof NavigationPolicyError) return navigationDeniedResult(error);
   if (error instanceof BrowserInspectionError) return inspectionUnavailableResult(error);
+  if (error instanceof BrowserInteractionError) return interactionUnavailableResult(error);
   if (error instanceof Error && isMissingChromiumError(error)) return browserInstallRequiredResult(error);
   return undefined;
 }
@@ -321,11 +352,21 @@ type InspectedPagePayload = {
   elements: Array<Omit<InspectElementDetails, "id">>;
 };
 
+type LocatorLike = {
+  click(): Promise<unknown>;
+  type(value: string): Promise<unknown>;
+  fill(value: string): Promise<unknown>;
+  press(value: string): Promise<unknown>;
+  selectOption(value: string): Promise<unknown>;
+};
+
 type PageLike = {
   goto(url: string, options: { waitUntil: "load"; timeout: number }): Promise<unknown>;
   url(): string;
   title(): Promise<string>;
   evaluate<R>(pageFunction: () => R): Promise<R>;
+  locator(selector: string): LocatorLike;
+  keyboard?: { press(value: string): Promise<unknown> };
 };
 
 type BrowserSession = {
@@ -333,6 +374,9 @@ type BrowserSession = {
   context: BrowserContextLike;
   page: PageLike;
   inspectionSequence: number;
+  latestInspection?: {
+    elements: InspectElementDetails[];
+  };
 };
 
 function inspectPageInBrowser(): InspectedPagePayload {
@@ -454,6 +498,25 @@ function quotedForReport(value: string): string {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
 
+function requiredInteractionValue(action: InteractionAction, value: string | undefined): string {
+  if (value === undefined) throw new BrowserInteractionError(`Cannot ${action}: provide a value.`);
+  return value;
+}
+
+function missingInteractionTargetError(action: InteractionAction): BrowserInteractionError {
+  return new BrowserInteractionError(`Cannot ${action}: provide an elementId from the latest inspection or a raw selector.`);
+}
+
+function formatInteraction(details: BrowserInteractedDetails): string {
+  const target = details.elementId ? `element ${details.elementId}` : details.selector ? `selector ${details.selector}` : "page keyboard";
+  return `Ran ${details.action} on ${target}. Inspect again before using element IDs.`;
+}
+
+function requiredInteractionLocator(action: InteractionAction, locator: LocatorLike | undefined): LocatorLike {
+  if (!locator) throw missingInteractionTargetError(action);
+  return locator;
+}
+
 export class BrowserManager {
   private sessions = new Map<string, BrowserSession>();
 
@@ -465,6 +528,7 @@ export class BrowserManager {
   ): Promise<{ url: string; title: string }> {
     const session = await this.getSession(options.session, options.headless);
     await session.page.goto(url, { waitUntil: "load", timeout: options.timeoutMs });
+    session.latestInspection = undefined;
     return { url: session.page.url(), title: await session.page.title() };
   }
 
@@ -474,16 +538,91 @@ export class BrowserManager {
 
     const payload = await session.page.evaluate(inspectPageInBrowser);
     const inspectionId = ++session.inspectionSequence;
+    const elements = payload.elements.map((element, index) => ({
+      id: `e${index + 1}`,
+      ...element,
+    }));
+    session.latestInspection = { elements };
     return {
       inspectionId,
       url: session.page.url(),
       title: await session.page.title(),
       text: payload.text,
-      elements: payload.elements.map((element, index) => ({
-        id: `e${index + 1}`,
-        ...element,
-      })),
+      elements,
     };
+  }
+
+  async interact(name: string, request: InteractionRequest): Promise<BrowserInteractedDetails> {
+    const session = this.sessions.get(name);
+    if (!session) throw new BrowserInteractionError(`Cannot interact with browser session ${name}: navigate first.`);
+
+    const selector = this.resolveInteractionSelector(session, request);
+    await this.performInteraction(session, selector, request);
+    session.latestInspection = undefined;
+
+    return {
+      status: "interacted",
+      session: name,
+      action: request.action,
+      ...(selector ? { selector } : {}),
+      ...(request.elementId ? { elementId: request.elementId } : {}),
+      ...(request.value !== undefined ? { value: request.value } : {}),
+    };
+  }
+
+  private resolveInteractionSelector(session: BrowserSession, request: InteractionRequest): string | undefined {
+    if (request.selector && request.elementId) {
+      throw new BrowserInteractionError(`Cannot ${request.action}: provide either an elementId or a raw selector, not both.`);
+    }
+    if (request.selector) return request.selector;
+    if (!request.elementId) {
+      if (request.action === "press") return undefined;
+      throw missingInteractionTargetError(request.action);
+    }
+
+    const inspection = session.latestInspection;
+    if (!inspection) {
+      throw new BrowserInteractionError(`Element ID ${request.elementId} is stale. Inspect again, then use an element ID from the latest inspection.`);
+    }
+
+    const element = inspection.elements.find((candidate) => candidate.id === request.elementId);
+    if (!element) {
+      throw new BrowserInteractionError(`Element ID ${request.elementId} was not found in the latest inspection. Inspect again and choose a listed element ID.`);
+    }
+    const selector = element.selectors[0];
+    if (!selector) {
+      throw new BrowserInteractionError(`Element ID ${request.elementId} has no selector. Use a raw selector instead.`);
+    }
+    return selector;
+  }
+
+  private async performInteraction(
+    session: BrowserSession,
+    selector: string | undefined,
+    request: InteractionRequest,
+  ): Promise<void> {
+    const locator = selector ? session.page.locator(selector) : undefined;
+    switch (request.action) {
+      case "click":
+        await requiredInteractionLocator(request.action, locator).click();
+        return;
+      case "type":
+        await requiredInteractionLocator(request.action, locator).type(requiredInteractionValue(request.action, request.value));
+        return;
+      case "fill":
+        await requiredInteractionLocator(request.action, locator).fill(requiredInteractionValue(request.action, request.value));
+        return;
+      case "press": {
+        const value = requiredInteractionValue(request.action, request.value);
+        if (locator) await locator.press(value);
+        else if (session.page.keyboard) await session.page.keyboard.press(value);
+        else throw new BrowserInteractionError(`Cannot press ${value}: this browser page does not expose keyboard input.`);
+        return;
+      }
+      case "select":
+        await requiredInteractionLocator(request.action, locator).selectOption(requiredInteractionValue(request.action, request.value));
+        return;
+    }
   }
 
   private async getSession(name: string, headless: boolean): Promise<BrowserSession> {
@@ -651,8 +790,16 @@ export function createBrowserTools(dependencies: BrowserToolDependencies = {}): 
         selector: Type.Optional(Type.String({ description: "Raw selector to target." })),
         value: Type.Optional(Type.String({ description: "Text, key, or option value for the action." })),
       }),
-      async execute() {
-        return notImplemented("browser_interact");
+      async execute(_toolCallId, params): Promise<AgentToolResult<unknown>> {
+        try {
+          const session = params.session ?? "default";
+          const details = await manager.interact(session, params);
+          return textResult(formatInteraction(details), details);
+        } catch (error) {
+          const result = toolErrorResult(error);
+          if (result) return result;
+          throw error;
+        }
       },
     }),
     defineTool({
