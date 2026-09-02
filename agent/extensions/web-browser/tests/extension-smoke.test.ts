@@ -57,17 +57,15 @@ test("default export loads without using other Pi APIs", () => {
   );
 });
 
-test("tools not built yet return clear not implemented results", async () => {
+test("browser_close is implemented", async () => {
   assert.equal(browserTools.length, expectedToolNames.length);
 
-  const paramsByTool: Record<string, Record<string, unknown>> = {
-    browser_close: {},
-  };
+  const close = browserTools.find((tool) => tool.name === "browser_close") as AnyToolDefinition | undefined;
+  assert.ok(close);
 
-  for (const tool of browserTools.filter((tool) => ["browser_close"].includes(tool.name)) as AnyToolDefinition[]) {
-    const result = await tool.execute("test-call", paramsByTool[tool.name] ?? {}, undefined, undefined, { cwd: process.cwd() } as never);
-    assert.equal(result.details.status, "not_implemented");
-    assert.equal(result.details.tool, tool.name);
-    assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /not implemented yet/i);
-  }
+  const result = await close.execute("test-call", {}, undefined, undefined, { cwd: process.cwd() } as never);
+  assert.equal(result.details.status, "closed");
+  assert.equal(result.details.session, "default");
+  assert.equal(result.details.existed, false);
+  assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /default was not open/);
 });

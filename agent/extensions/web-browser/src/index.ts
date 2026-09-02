@@ -8,11 +8,6 @@ import { CONFIG_DIR_NAME, defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { chromium } from "playwright";
 
-type PlaceholderDetails = {
-  status: "not_implemented";
-  tool: string;
-};
-
 type NavigationDeniedDetails = {
   status: "denied";
   reason: string;
@@ -24,6 +19,17 @@ type NavigationLoadedDetails = {
   url: string;
   title: string;
   timeoutMs: number;
+};
+
+type BrowserClosedDetails = {
+  status: "closed";
+  session: string;
+  existed: boolean;
+};
+
+type BrowserSessionModeConflictDetails = {
+  status: "session_mode_conflict";
+  reason: string;
 };
 
 type BrowserInstallRequiredDetails = {
@@ -153,6 +159,13 @@ class NavigationPolicyError extends Error {
   }
 }
 
+class BrowserSessionModeConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserSessionModeConflictError";
+  }
+}
+
 class BrowserInspectionError extends Error {
   constructor(message: string) {
     super(message);
@@ -200,13 +213,6 @@ function textResult<TDetails>(text: string, details: TDetails): AgentToolResult<
   };
 }
 
-function notImplemented(tool: string): AgentToolResult<PlaceholderDetails> {
-  return textResult(
-    `${tool} is registered, but browser behavior is not implemented yet. Playwright-backed behavior will be added in a later ticket.`,
-    { status: "not_implemented", tool },
-  );
-}
-
 function configErrorResult(error: BrowserConfigError): AgentToolResult<ConfigErrorDetails> {
   return textResult(error.message, { status: "config_error", reason: error.message });
 }
@@ -218,6 +224,10 @@ function navigationDeniedResult(error: NavigationPolicyError): AgentToolResult<N
 function browserInstallRequiredResult(error: Error): AgentToolResult<BrowserInstallRequiredDetails> {
   const message = `Chromium is not installed for Playwright. Run \`npx playwright install chromium\` and try again.`;
   return textResult(message, { status: "browser_install_required", reason: error.message });
+}
+
+function sessionModeConflictResult(error: BrowserSessionModeConflictError): AgentToolResult<BrowserSessionModeConflictDetails> {
+  return textResult(error.message, { status: "session_mode_conflict", reason: error.message });
 }
 
 function inspectionUnavailableResult(error: BrowserInspectionError): AgentToolResult<BrowserInspectionUnavailableDetails> {
@@ -243,6 +253,7 @@ function toolErrorResult(
       | ConfigErrorDetails
       | NavigationDeniedDetails
       | BrowserInstallRequiredDetails
+      | BrowserSessionModeConflictDetails
       | BrowserInspectionUnavailableDetails
       | BrowserInteractionUnavailableDetails
       | BrowserRawHtmlUnavailableDetails
@@ -251,6 +262,7 @@ function toolErrorResult(
   | undefined {
   if (error instanceof BrowserConfigError) return configErrorResult(error);
   if (error instanceof NavigationPolicyError) return navigationDeniedResult(error);
+  if (error instanceof BrowserSessionModeConflictError) return sessionModeConflictResult(error);
   if (error instanceof BrowserInspectionError) return inspectionUnavailableResult(error);
   if (error instanceof BrowserInteractionError) return interactionUnavailableResult(error);
   if (error instanceof BrowserRawHtmlError) return rawHtmlUnavailableResult(error);
@@ -440,7 +452,14 @@ type BrowserSession = {
   latestInspection?: {
     elements: InspectElementDetails[];
   };
+  headless: boolean;
 };
+
+function formatClose(details: BrowserClosedDetails): string {
+  return details.existed
+    ? `Closed browser session ${details.session}.`
+    : `Browser session ${details.session} was not open.`;
+}
 
 function inspectPageInBrowser(): InspectedPagePayload {
   const maxTextLength = 8_000;
@@ -659,9 +678,9 @@ export class BrowserManager {
 
   async navigate(
     url: string,
-    options: { session: string; headless: boolean; timeoutMs: number },
+    options: { session: string; requestedHeadless?: boolean; defaultHeadless: boolean; timeoutMs: number },
   ): Promise<{ url: string; title: string }> {
-    const session = await this.getSession(options.session, options.headless);
+    const session = await this.getSession(options.session, options.requestedHeadless, options.defaultHeadless);
     await session.page.goto(url, { waitUntil: "load", timeout: options.timeoutMs });
     session.latestInspection = undefined;
     return { url: session.page.url(), title: await session.page.title() };
@@ -751,6 +770,16 @@ export class BrowserManager {
     };
   }
 
+  async close(name: string): Promise<BrowserClosedDetails> {
+    const session = this.sessions.get(name);
+    if (!session) return { status: "closed", session: name, existed: false };
+
+    this.sessions.delete(name);
+    await session.context.close();
+    await session.browser.close();
+    return { status: "closed", session: name, existed: true };
+  }
+
   private resolveInteractionSelector(session: BrowserSession, request: InteractionRequest): string | undefined {
     if (request.selector && request.elementId) {
       throw new BrowserInteractionError(`Cannot ${request.action}: provide either an elementId or a raw selector, not both.`);
@@ -806,14 +835,22 @@ export class BrowserManager {
     }
   }
 
-  private async getSession(name: string, headless: boolean): Promise<BrowserSession> {
+  private async getSession(name: string, requestedHeadless: boolean | undefined, defaultHeadless: boolean): Promise<BrowserSession> {
     const existing = this.sessions.get(name);
-    if (existing) return existing;
+    if (existing) {
+      if (requestedHeadless !== undefined && requestedHeadless !== existing.headless) {
+        throw new BrowserSessionModeConflictError(
+          `Browser session ${name} is already ${existing.headless ? "headless" : "headed"}. Close it before changing mode.`,
+        );
+      }
+      return existing;
+    }
 
+    const headless = requestedHeadless ?? defaultHeadless;
     const browser = await this.browserType.launch({ headless });
     const context = await browser.newContext();
     const page = await context.newPage();
-    const session = { browser, context, page, inspectionSequence: 0 };
+    const session = { browser, context, page, inspectionSequence: 0, headless };
     this.sessions.set(name, session);
     return session;
   }
@@ -836,7 +873,8 @@ async function checkedNavigationResult(
     const timeoutMs = params.timeoutMs ?? config.navigationTimeoutMs;
     const loaded = await manager.navigate(params.url, {
       session,
-      headless: params.headless ?? config.headless,
+      requestedHeadless: params.headless,
+      defaultHeadless: config.headless,
       timeoutMs,
     });
     return textResult(`Loaded ${loaded.title || loaded.url} at ${loaded.url}.`, {
@@ -1016,8 +1054,10 @@ export function createBrowserTools(dependencies: BrowserToolDependencies = {}): 
       parameters: Type.Object({
         session: sessionParameter,
       }),
-      async execute() {
-        return notImplemented("browser_close");
+      async execute(_toolCallId, params): Promise<AgentToolResult<BrowserClosedDetails>> {
+        const session = params.session ?? "default";
+        const details = await manager.close(session);
+        return textResult(formatClose(details), details);
       },
     }),
   ] satisfies ToolDefinition[];
