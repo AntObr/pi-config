@@ -126,7 +126,7 @@ Success details:
 }
 ```
 
-The text result includes visible page text and interactable links, buttons, inputs, selects, and textareas. Element IDs are valid only for the latest inspection in that session. Inspect again after navigation or page changes before using an element ID.
+The text result includes visible page text and interactable links, buttons, inputs, selects, and textareas. Element IDs are valid until navigation, page changes, or any `browser_interact` call in that session. Inspect again before using another element ID.
 
 ### `browser_interact`
 
