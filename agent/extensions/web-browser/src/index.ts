@@ -46,6 +46,11 @@ type BrowserRawHtmlUnavailableDetails = {
   reason: string;
 };
 
+type BrowserScreenshotUnavailableDetails = {
+  status: "screenshot_unavailable";
+  reason: string;
+};
+
 type BrowserRawHtmlDetails = {
   status: "captured";
   session: string;
@@ -56,6 +61,16 @@ type BrowserRawHtmlDetails = {
   truncated: boolean;
   artifactPath?: string;
   artifactFile?: string;
+};
+
+type BrowserScreenshotDetails = {
+  status: "captured";
+  session: string;
+  url: string;
+  title: string;
+  artifactPath: string;
+  artifactFile: string;
+  fullPage: boolean;
 };
 
 type BrowserInteractedDetails = {
@@ -159,6 +174,13 @@ class BrowserRawHtmlError extends Error {
   }
 }
 
+class BrowserScreenshotError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserScreenshotError";
+  }
+}
+
 const packageDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const sessionParameter = Type.Optional(
@@ -210,6 +232,10 @@ function rawHtmlUnavailableResult(error: BrowserRawHtmlError): AgentToolResult<B
   return textResult(error.message, { status: "raw_html_unavailable", reason: error.message });
 }
 
+function screenshotUnavailableResult(error: BrowserScreenshotError): AgentToolResult<BrowserScreenshotUnavailableDetails> {
+  return textResult(error.message, { status: "screenshot_unavailable", reason: error.message });
+}
+
 function toolErrorResult(
   error: unknown,
 ):
@@ -220,6 +246,7 @@ function toolErrorResult(
       | BrowserInspectionUnavailableDetails
       | BrowserInteractionUnavailableDetails
       | BrowserRawHtmlUnavailableDetails
+      | BrowserScreenshotUnavailableDetails
     >
   | undefined {
   if (error instanceof BrowserConfigError) return configErrorResult(error);
@@ -227,6 +254,7 @@ function toolErrorResult(
   if (error instanceof BrowserInspectionError) return inspectionUnavailableResult(error);
   if (error instanceof BrowserInteractionError) return interactionUnavailableResult(error);
   if (error instanceof BrowserRawHtmlError) return rawHtmlUnavailableResult(error);
+  if (error instanceof BrowserScreenshotError) return screenshotUnavailableResult(error);
   if (error instanceof Error && isMissingChromiumError(error)) return browserInstallRequiredResult(error);
   return undefined;
 }
@@ -400,6 +428,7 @@ type PageLike = {
   title(): Promise<string>;
   evaluate<R, Arg = undefined>(pageFunction: (arg: Arg) => R, arg?: Arg): Promise<R>;
   locator(selector: string): LocatorLike;
+  screenshot(options: { path: string; fullPage: boolean }): Promise<Buffer>;
   keyboard?: { press(value: string): Promise<unknown> };
 };
 
@@ -563,10 +592,20 @@ function formatInteraction(details: BrowserInteractedDetails): string {
   return `Ran ${details.action} on ${target}. Inspect again before using element IDs.`;
 }
 
+function artifactTimestamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function safeArtifactNamePart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
 function rawHtmlArtifactFile(session: string): string {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const safeSession = session.replace(/[^a-zA-Z0-9_-]/g, "_");
-  return `raw-html-${safeSession}-${timestamp}.html`;
+  return `raw-html-${safeArtifactNamePart(session)}-${artifactTimestamp()}.html`;
+}
+
+function screenshotArtifactFile(session: string): string {
+  return `screenshot-${safeArtifactNamePart(session)}-${artifactTimestamp()}.png`;
 }
 
 function byteLength(value: string): number {
@@ -660,6 +699,37 @@ export class BrowserManager {
       url: session.page.url(),
       title: await session.page.title(),
       html: payload.html ?? "",
+    };
+  }
+
+  async screenshot(name: string, artifactDir: string, fullPage: boolean): Promise<Omit<BrowserScreenshotDetails, "status" | "session">> {
+    const session = this.sessions.get(name);
+    if (!session) throw new BrowserScreenshotError(`Cannot capture screenshot for browser session ${name}: navigate first.`);
+
+    try {
+      await mkdir(artifactDir, { recursive: true });
+    } catch {
+      throw new BrowserScreenshotError(`Cannot create screenshot artifact directory ${artifactDir}: check that the path is writable.`);
+    }
+
+    const artifactFile = screenshotArtifactFile(name);
+    const artifactPath = join(artifactDir, artifactFile);
+    let title: string;
+    try {
+      title = await session.page.title();
+      await session.page.screenshot({ path: artifactPath, fullPage });
+    } catch {
+      throw new BrowserScreenshotError(
+        `Cannot capture screenshot for browser session ${name}: page is unavailable. Navigate or reload the page and try again.`,
+      );
+    }
+
+    return {
+      url: session.page.url(),
+      title,
+      artifactPath,
+      artifactFile,
+      fullPage,
     };
   }
 
@@ -893,8 +963,19 @@ export function createBrowserTools(dependencies: BrowserToolDependencies = {}): 
         session: sessionParameter,
         fullPage: Type.Optional(Type.Boolean({ description: "Capture the full page." })),
       }),
-      async execute() {
-        return notImplemented("browser_screenshot");
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+        try {
+          const config = await resolveConfigForTool(ctx);
+          const session = params.session ?? "default";
+          const fullPage = params.fullPage ?? false;
+          const captured = await manager.screenshot(session, config.artifactDir, fullPage);
+          const details = { status: "captured", session, ...captured } satisfies BrowserScreenshotDetails;
+          return textResult(`Screenshot saved to ${captured.artifactPath}.`, details);
+        } catch (error) {
+          const result = toolErrorResult(error);
+          if (result) return result;
+          throw error;
+        }
       },
     }),
     defineTool({

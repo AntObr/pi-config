@@ -1,6 +1,6 @@
 # Pi web browser extension
 
-A Pi extension package for browser tools. `browser_navigate` and `browser_inspect` are backed by Playwright Chromium. Tools from later tickets are registered and return safe placeholder results until they land.
+A Pi extension package for browser tools. `browser_navigate`, `browser_search`, `browser_inspect`, `browser_raw_html`, `browser_screenshot`, and `browser_interact` are backed by Playwright Chromium. Tools from later tickets are registered and return safe placeholder results until they land.
 
 ## Setup
 
@@ -59,4 +59,6 @@ An empty `allowedHosts` list allows any host unless `blockedHosts` matches. A no
 
 `browser_inspect` returns the current URL, title, visible page text, and interactable links, buttons, inputs, selects, and textareas for the active session. Each element gets an ID for the latest inspection plus suggested selectors when the page exposes useful attributes or text. Inspect again after navigation or page changes before reusing element IDs.
 
-The remaining tools still return a "not implemented yet" result.
+`browser_screenshot` saves the current page as a PNG under the configured artifact directory. The default is `.pi/web-browser-artifacts` under the project. The tool returns the file path and metadata only, not image bytes.
+
+`browser_close` still returns a "not implemented yet" result.
