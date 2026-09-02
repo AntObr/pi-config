@@ -470,86 +470,89 @@ function formatClose(details: BrowserClosedDetails): string {
 function inspectPageInBrowser(): InspectedPagePayload {
   const maxTextLength = 8_000;
   const selector = "a[href], button, input, select, textarea";
+  // Keep browser-context utilities as object methods so TS loaders that preserve function names
+  // do not inject external helpers into serialized code.
+  const browserContextHelpers = {
+    normalizeText(value: string | null | undefined): string | undefined {
+      const text = value?.replace(/\s+/g, " ").trim();
+      return text ? text.slice(0, 200) : undefined;
+    },
 
-  function normalizeText(value: string | null | undefined): string | undefined {
-    const text = value?.replace(/\s+/g, " ").trim();
-    return text ? text.slice(0, 200) : undefined;
-  }
+    cssEscape(value: string): string {
+      const escape = (globalThis as typeof globalThis & { CSS?: { escape?: (text: string) => string } }).CSS?.escape;
+      if (escape) return escape(value);
+      return value.replace(/^-?\d|[^a-zA-Z0-9_-]/g, (character) => `\\${character.codePointAt(0)?.toString(16)} `);
+    },
 
-  function cssEscape(value: string): string {
-    const escape = (globalThis as typeof globalThis & { CSS?: { escape?: (text: string) => string } }).CSS?.escape;
-    if (escape) return escape(value);
-    return value.replace(/^-?\d|[^a-zA-Z0-9_-]/g, (character) => `\\${character.codePointAt(0)?.toString(16)} `);
-  }
+    quoted(value: string): string {
+      return `"${value.replace(/(["\\])/g, "\\$1")}"`;
+    },
 
-  function quoted(value: string): string {
-    return `"${value.replace(/(["\\])/g, "\\$1")}"`;
-  }
+    isUsable(element: Element): boolean {
+      if (!(element instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(element);
+      if (style.visibility === "hidden" || style.display === "none") return false;
+      if (element.matches("input[type='hidden'], [hidden], [aria-hidden='true']")) return false;
+      return element.getClientRects().length > 0;
+    },
 
-  function isUsable(element: Element): boolean {
-    if (!(element instanceof HTMLElement)) return false;
-    const style = window.getComputedStyle(element);
-    if (style.visibility === "hidden" || style.display === "none") return false;
-    if (element.matches("input[type='hidden'], [hidden], [aria-hidden='true']")) return false;
-    return element.getClientRects().length > 0;
-  }
-
-  function labelFor(element: Element): string | undefined {
-    if (!(element instanceof HTMLElement)) return undefined;
-    const ariaLabel = normalizeText(element.getAttribute("aria-label"));
-    if (ariaLabel) return ariaLabel;
-    const labelledBy = element.getAttribute("aria-labelledby");
-    if (labelledBy) {
-      const labelledText = normalizeText(
-        labelledBy
-          .split(/\s+/)
-          .map((id) => document.getElementById(id)?.innerText)
-          .filter(Boolean)
-          .join(" "),
-      );
-      if (labelledText) return labelledText;
-    }
-    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-      if (element.id) {
-        const explicitLabel = normalizeText(document.querySelector(`label[for="${cssEscape(element.id)}"]`)?.textContent);
-        if (explicitLabel) return explicitLabel;
+    labelFor(element: Element): string | undefined {
+      if (!(element instanceof HTMLElement)) return undefined;
+      const ariaLabel = browserContextHelpers.normalizeText(element.getAttribute("aria-label"));
+      if (ariaLabel) return ariaLabel;
+      const labelledBy = element.getAttribute("aria-labelledby");
+      if (labelledBy) {
+        const labelledText = browserContextHelpers.normalizeText(
+          labelledBy
+            .split(/\s+/)
+            .map((id) => document.getElementById(id)?.innerText)
+            .filter(Boolean)
+            .join(" "),
+        );
+        if (labelledText) return labelledText;
       }
-      const wrappedLabel = normalizeText(element.closest("label")?.textContent);
-      if (wrappedLabel) return wrappedLabel;
-      const placeholder = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? normalizeText(element.placeholder) : undefined;
-      if (placeholder) return placeholder;
-      const name = normalizeText(element.getAttribute("name"));
-      if (name) return name;
-    }
-    return undefined;
-  }
+      if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+        if (element.id) {
+          const explicitLabel = browserContextHelpers.normalizeText(document.querySelector(`label[for="${browserContextHelpers.cssEscape(element.id)}"]`)?.textContent);
+          if (explicitLabel) return explicitLabel;
+        }
+        const wrappedLabel = browserContextHelpers.normalizeText(element.closest("label")?.textContent);
+        if (wrappedLabel) return wrappedLabel;
+        const placeholder = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? browserContextHelpers.normalizeText(element.placeholder) : undefined;
+        if (placeholder) return placeholder;
+        const name = browserContextHelpers.normalizeText(element.getAttribute("name"));
+        if (name) return name;
+      }
+      return undefined;
+    },
 
-  function selectorsFor(element: Element, text: string | undefined, label: string | undefined): string[] {
-    const selectors: string[] = [];
-    const tag = element.tagName.toLowerCase();
-    const id = element.getAttribute("id");
-    if (id) selectors.push(`#${cssEscape(id)}`);
-    for (const attr of ["data-testid", "data-test", "data-cy", "name", "placeholder", "aria-label"] as const) {
-      const value = element.getAttribute(attr);
-      if (value) selectors.push(`${tag}[${attr}=${quoted(value)}]`);
-    }
-    if (label && element.closest("label")) selectors.push(`label:has-text(${quoted(label)}) ${tag}`);
-    if (element instanceof HTMLAnchorElement) {
-      const href = element.getAttribute("href");
-      if (href) selectors.push(`a[href=${quoted(href)}]`);
-    }
-    if ((tag === "button" || tag === "a") && text) selectors.push(`${tag}:has-text(${quoted(text)})`);
-    if (label && selectors.length === 0) selectors.push(`${tag}:near(:text(${quoted(label)}))`);
-    return [...new Set(selectors)].slice(0, 4);
-  }
+    selectorsFor(element: Element, text: string | undefined, label: string | undefined): string[] {
+      const selectors: string[] = [];
+      const tag = element.tagName.toLowerCase();
+      const id = element.getAttribute("id");
+      if (id) selectors.push(`#${browserContextHelpers.cssEscape(id)}`);
+      for (const attr of ["data-testid", "data-test", "data-cy", "name", "placeholder", "aria-label"] as const) {
+        const value = element.getAttribute(attr);
+        if (value) selectors.push(`${tag}[${attr}=${browserContextHelpers.quoted(value)}]`);
+      }
+      if (label && element.closest("label")) selectors.push(`label:has-text(${browserContextHelpers.quoted(label)}) ${tag}`);
+      if (element instanceof HTMLAnchorElement) {
+        const href = element.getAttribute("href");
+        if (href) selectors.push(`a[href=${browserContextHelpers.quoted(href)}]`);
+      }
+      if ((tag === "button" || tag === "a") && text) selectors.push(`${tag}:has-text(${browserContextHelpers.quoted(text)})`);
+      if (label && selectors.length === 0) selectors.push(`${tag}:near(:text(${browserContextHelpers.quoted(label)}))`);
+      return [...new Set(selectors)].slice(0, 4);
+    },
+  };
 
   const text = (document.body?.innerText ?? "").replace(/\n{3,}/g, "\n\n").trim().slice(0, maxTextLength);
   const elements = Array.from(document.querySelectorAll(selector))
-    .filter(isUsable)
+    .filter(browserContextHelpers.isUsable)
     .map((element) => {
       const tag = element.tagName.toLowerCase();
-      const text = normalizeText(element.textContent);
-      const label = labelFor(element);
+      const text = browserContextHelpers.normalizeText(element.textContent);
+      const label = browserContextHelpers.labelFor(element);
       const type = element instanceof HTMLInputElement ? element.type : undefined;
       const href = element instanceof HTMLAnchorElement ? element.href : undefined;
       return {
@@ -558,7 +561,7 @@ function inspectPageInBrowser(): InspectedPagePayload {
         ...(text ? { text } : {}),
         ...(label ? { label } : {}),
         ...(href ? { href } : {}),
-        selectors: selectorsFor(element, text, label),
+        selectors: browserContextHelpers.selectorsFor(element, text, label),
       };
     });
 
