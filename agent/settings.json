@@ -10,6 +10,7 @@
   "packages": [
     "npm:@earendil-works/pi-voice",
     "git:github.com/DietrichGebert/ponytail",
-    "npm:@tintinweb/pi-subagents"
+    "npm:@tintinweb/pi-subagents",
+    "npm:pi-web-access"
   ]
 }
