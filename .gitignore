@@ -15,6 +15,7 @@ agent/settings.local.json
 
 # Generated/cache-like files
 agent/models-store.json
+agent/web-search-cache/
 node_modules/
 
 # Logs and temp files
