@@ -7,7 +7,6 @@ agent/auth.json
 
 # Pi runtime state
 agent/sessions/
-agent/subagents/runs/
 pi-acp/
 
 # Machine-specific config
@@ -17,7 +16,6 @@ agent/settings.local.json
 # Generated/cache-like files
 agent/models-store.json
 node_modules/
-web-browser-artifacts/
 
 # Logs and temp files
 *.log
