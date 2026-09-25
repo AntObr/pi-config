@@ -6,5 +6,8 @@
   "compaction": {
     "enabled": true
   },
-  "tuiMode": "fullscreen"
+  "tuiMode": "fullscreen",
+  "packages": [
+    "npm:@earendil-works/pi-voice"
+  ]
 }
