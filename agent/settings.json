@@ -8,6 +8,7 @@
   },
   "tuiMode": "fullscreen",
   "packages": [
-    "npm:@earendil-works/pi-voice"
+    "npm:@earendil-works/pi-voice",
+    "git:github.com/DietrichGebert/ponytail"
   ]
 }
