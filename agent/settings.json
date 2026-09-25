@@ -1,8 +1,8 @@
 {
   "lastChangelogVersion": "0.87.1",
   "theme": "dark",
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.5",
+  "defaultProvider": "github-copilot",
+  "defaultModel": "gpt-6-sol",
   "compaction": {
     "enabled": true
   },
