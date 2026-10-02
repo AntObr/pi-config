@@ -1,0 +1,8 @@
+{
+  "searchUrl": "https://www.google.com/search?q={query}",
+  "defaultHeadless": true,
+  "navigationTimeoutMs": 30000,
+  "allowedHosts": [],
+  "blockedHosts": [],
+  "artifactsDir": ".pi/web-browser-artifacts"
+}
